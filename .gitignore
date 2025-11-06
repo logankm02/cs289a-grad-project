@@ -1,0 +1,19 @@
+# Virtual environments
+.venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Credentials and tokens
+token.json
+.cache/
+
+# OS metadata
+.DS_Store
+
+.env
+*.json
+
+chroma_email_index/

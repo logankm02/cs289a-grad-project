@@ -1,3 +1,10 @@
+# updates on sub_labeling:
+- user can enable sub_label by including --enable-sub-labels in the command, example command: python cluster.py --user-email user_email.com --min-cluster-size 5 --max-threads 200 --output-file cluster_summary.txt --apply-labels --enable-sub-labels --log-level INFO
+- if choose not to enable sub_label, user can do python cluster.py --user-email user_email.com --min-cluster-size 5 --max-threads 200 --output-file cluster_summary.txt --apply-labels --log-level INFO
+
+
+
+
 # Gmail Thread Indexing & Clustering
 
 Tools for downloading Gmail threads into a local [ChromaDB](https://docs.trychroma.com/) collection, embedding their contents, and optionally clustering / labeling them back in Gmail. The repo provides two entry points:

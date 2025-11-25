@@ -83,6 +83,20 @@ python cluster.py --user-email you@example.com \
 
 The script prints a summary of discovered clusters, their representative subjects, and any outlier threads.
 
+# Updates on Sub-Labeling:
+
+- User can enable sub_label by including --enable-sub-labels in the command, example command:
+
+```bash
+python cluster.py --user-email user_email.com --min-cluster-size 5 --max-threads 200 --output-file cluster_summary.txt --apply-labels --enable-sub-labels --log-level INFO
+```
+
+- If user choose not to enable sub_label, user can do
+
+```bash
+python cluster.py --user-email user_email.com --min-cluster-size 5 --max-threads 200 --output-file cluster_summary.txt --apply-labels --log-level INFO
+```
+
 ## Run the API + UI
 
 The repo includes a lightweight FastAPI backend (`api.py`) and a React/Vite frontend under `frontend/` to drive indexing, clustering, and visualization from the browser.

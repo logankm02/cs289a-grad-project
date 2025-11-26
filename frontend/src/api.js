@@ -17,14 +17,13 @@ const base =
 const api = axios.create({ baseURL: `${base}/api` });
 
 export async function fetchClusters(opts = {}) {
-  // user_email, min_cluster_size and max_threads can be provided via params
-  // Accept an options object: { user_email, min_cluster_size, max_threads }
+  // user_email, min_cluster_size, max_threads, enable_sub_labels
   const resp = await api.get("/clusters", { params: opts });
   return resp.data;
 }
 
 export async function runClusters(opts = {}) {
-  // opts -> sent as query params (user_email, min_cluster_size, max_threads)
+  // opts -> sent as query params (user_email, min_cluster_size, max_threads, enable_sub_labels)
   const resp = await api.post("/clusters/run", null, { params: opts });
   return resp.data;
 }

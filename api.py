@@ -46,7 +46,7 @@ def health() -> Dict[str, str]:
 
 
 @app.get("/api/clusters")
-def get_clusters(user_email: Optional[str] = None, min_cluster_size: int = 5, max_threads: int = 1000):
+def get_clusters(user_email: Optional[str] = None, min_cluster_size: int = 5, max_threads: int = 1000, enable_sub_labels: bool = False):
     """Run clustering synchronously and return the results.
 
     For large datasets this will take time. Use `/api/clusters/run` to run async.
@@ -58,6 +58,7 @@ def get_clusters(user_email: Optional[str] = None, min_cluster_size: int = 5, ma
             min_cluster_size=min_cluster_size,
             max_threads=max_threads,
             apply_labels=False,
+            enable_sub_labels=enable_sub_labels,
             output_file=None,
         )
         global _LAST_CLUSTER_RESULT
@@ -67,7 +68,7 @@ def get_clusters(user_email: Optional[str] = None, min_cluster_size: int = 5, ma
     return {"status": "ok", "result": result}
 
 
-def _run_cluster_task(task_id: str, user_email: Optional[str], min_cluster_size: int, max_threads: int) -> None:
+def _run_cluster_task(task_id: str, user_email: Optional[str], min_cluster_size: int, max_threads: int, enable_sub_labels: bool) -> None:
     try:
         _TASKS[task_id]["status"] = "running"
         res = cluster.cluster_emails(
@@ -76,6 +77,7 @@ def _run_cluster_task(task_id: str, user_email: Optional[str], min_cluster_size:
             min_cluster_size=min_cluster_size,
             max_threads=max_threads,
             apply_labels=False,
+            enable_sub_labels=enable_sub_labels,
             output_file=None,
         )
         _TASKS[task_id]["status"] = "finished"
@@ -88,7 +90,7 @@ def _run_cluster_task(task_id: str, user_email: Optional[str], min_cluster_size:
 
 
 @app.post("/api/clusters/run")
-def run_clusters(background: BackgroundTasks, user_email: Optional[str] = None, min_cluster_size: int = 5, max_threads: int = 1000):
+def run_clusters(background: BackgroundTasks, user_email: Optional[str] = None, min_cluster_size: int = 5, max_threads: int = 1000, enable_sub_labels: bool = False):
     """Start clustering in the background and return a task id.
 
     The task store is in-memory and only intended for local development.
@@ -99,7 +101,7 @@ def run_clusters(background: BackgroundTasks, user_email: Optional[str] = None, 
     # Start a thread to run the clustering work so uvicorn isn't blocked.
     thread = threading.Thread(
         target=_run_cluster_task,
-        args=(task_id, user_email, min_cluster_size, max_threads),
+        args=(task_id, user_email, min_cluster_size, max_threads, enable_sub_labels),
         daemon=True,
     )
     thread.start()

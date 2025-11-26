@@ -72,7 +72,8 @@ python cluster.py --user-email you@example.com \
                   --max-threads 1000 \
                   [--output-file cluster_summary.txt] \
                   [--apply-labels] \
-                  [--log-level DEBUG]
+                  [--log-level DEBUG] \
+                  [--enable-sub-labels]
 ```
 
 - `--apply-labels` pushes generated labels back to Gmail; omit it for a dry run.
@@ -80,22 +81,9 @@ python cluster.py --user-email you@example.com \
 - Provide `--collection` instead of `--user-email` to cluster a specific Chroma collection manually.
 - `--log-level` switches the logging verbosity (DEBUG, INFO, WARNING, etc.).
 - Live progress logs show thread assignment, cluster labeling, and Gmail label application status while the command runs.
+- `--enable-sub-labels` turns on hierarchical sub-labeling within each cluster (optionally uses Gemini for labeling those subclusters).
 
 The script prints a summary of discovered clusters, their representative subjects, and any outlier threads.
-
-# Updates on Sub-Labeling:
-
-- User can enable sub_label by including --enable-sub-labels in the command, example command:
-
-```bash
-python cluster.py --user-email user_email.com --min-cluster-size 5 --max-threads 200 --output-file cluster_summary.txt --apply-labels --enable-sub-labels --log-level INFO
-```
-
-- If user choose not to enable sub_label, user can do
-
-```bash
-python cluster.py --user-email user_email.com --min-cluster-size 5 --max-threads 200 --output-file cluster_summary.txt --apply-labels --log-level INFO
-```
 
 ## Run the API + UI
 
@@ -123,14 +111,20 @@ npm run dev
 
 In the UI:
 
-1. Enter the same email you indexed. If it’s new, click “Run indexing (async)” first.
-2. After indexing finishes, run clustering (sync or async). The result panel shows status/logs; clusters render below with subjects/senders.
-3. Click “Load embeddings & show PCA” to see a scatter plot for the current user’s embeddings.
-4. “Load last cluster result” fetches the last completed clustering run on the server.
+1. Enter the same email you indexed. If it is new, click "Run indexing (async)" first.
+2. After indexing finishes, run clustering (sync or async). The result panel shows status/logs; clusters render below with subjects/senders (and subclusters if enabled).
+3. Click "Load embeddings & show PCA" to see a scatter plot for the current user's embeddings.
+4. "Load last cluster result" fetches the last completed clustering run on the server.
 
 ## UI Sample
 
-![Clustering Demo UI](/Images/UI_demo.png)
+### Iteration 2
+
+![Clustering Demo 2nd Iteration UI](/Images/UI_demo_2.png)
+
+### Iteration 1
+
+![Clustering Demo 1st Iteration UI](/Images/UI_demo.png)
 
 ## Virtual Environment Notes
 

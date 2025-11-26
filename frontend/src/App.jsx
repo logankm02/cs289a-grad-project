@@ -16,6 +16,7 @@ export default function App() {
   const [embedBatch, setEmbedBatch] = useState(64)
   const [resetIndex, setResetIndex] = useState(false)
   const [minClusterSize, setMinClusterSize] = useState(5)
+  const [enableSubLabels, setEnableSubLabels] = useState(false)
   const [points, setPoints] = useState(null)
 
   const clusterView = extractClusters(result)
@@ -75,7 +76,11 @@ export default function App() {
     }
     setLoading(true)
     try {
-      const res = await runClusters({ user_email: userEmail, min_cluster_size: minClusterSize })
+      const res = await runClusters({
+        user_email: userEmail,
+        min_cluster_size: minClusterSize,
+        enable_sub_labels: enableSubLabels,
+      })
       setTaskId(res.task_id)
       setTaskKind('cluster')
       setResult({ status: 'queued', task_id: res.task_id, kind: 'cluster' })
@@ -95,7 +100,11 @@ export default function App() {
     }
     setLoading(true)
     try {
-      const res = await fetchClusters({ user_email: userEmail, min_cluster_size: minClusterSize })
+      const res = await fetchClusters({
+        user_email: userEmail,
+        min_cluster_size: minClusterSize,
+        enable_sub_labels: enableSubLabels,
+      })
       setResult(res)
     } catch (err) {
       setResult({ error: formatError(err) })
@@ -164,8 +173,17 @@ export default function App() {
 
   return (
     <div className="app">
-      <header>
-        <h1>Email Clustering UI</h1>
+      <header className="hero">
+        <div>
+          <div className="eyebrow">Gmail Intelligence</div>
+          <h1>Email Clustering Workspace</h1>
+          <p className="subtitle">Index, cluster, and visualize Gmail threads with hierarchical sub-labels.</p>
+          <div className="hero-meta">
+            <span className="pill primary">Indexer</span>
+            <span className="pill primary">Clustering</span>
+            <span className="pill muted">{clusterView.clusters.length || 0} clusters</span>
+          </div>
+        </div>
       </header>
       <main>
         <div className="controls" style={{ marginBottom: 12 }}>
@@ -174,12 +192,12 @@ export default function App() {
             <ol>
               <li>Start the backend: <code>uvicorn api:app --port 8000</code> from the repo root.</li>
               <li>Start the frontend: <code>cd frontend && npm run dev</code> (uses <code>http://localhost:8000/api</code> by default).</li>
-              <li>Enter the same email you indexed; if new, run “Run indexing (async)” first.</li>
+              <li>Enter the same email you indexed; if new, run "Run indexing (async)" first.</li>
               <li>After indexing finishes, run clustering (sync or async) to see grouped threads.</li>
-              <li>Use “Load embeddings & show PCA” for the scatter plot, and browse clusters below.</li>
+              <li>Use "Load embeddings & show PCA" for the scatter plot, and browse clusters below.</li>
             </ol>
             <p className="hint">
-              If you see “No emails have been indexed yet”, restart the backend with the same env vars used during indexing
+              If you see "No emails have been indexed yet", restart the backend with the same env vars used during indexing
               (e.g., same <code>OPENAI_API_KEY</code> or none).
             </p>
           </div>
@@ -221,6 +239,10 @@ export default function App() {
                 <input type="number" min="2" value={minClusterSize} onChange={(e) => setMinClusterSize(Number(e.target.value || 0))} />
               </label>
             </div>
+            <label className="checkbox">
+              <input type="checkbox" checked={enableSubLabels} onChange={(e) => setEnableSubLabels(e.target.checked)} />
+              Enable sub-labeling (nested clusters)
+            </label>
             <button onClick={onFetch} disabled={loading}>Run sync clustering</button>
             <button onClick={onRunAsync} disabled={loading}>Run async clustering (auto-poll)</button>
             <button onClick={onPollTask} disabled={loading || !taskId}>Poll last task</button>
@@ -270,6 +292,30 @@ export default function App() {
                       </li>
                     ))}
                   </ul>
+                  {c.subclusters?.length ? (
+                    <div className="subcluster-block">
+                      <div className="pill muted">Subclusters</div>
+                      <div className="subcluster-grid">
+                        {c.subclusters.map((sub) => (
+                          <div className="subcluster-card" key={sub.subcluster_id || sub.label}>
+                            <div className="cluster-header">
+                              <div className="pill">Sub {sub.subcluster_id ?? ''}</div>
+                              <div className="pill muted">{sub.thread_count ?? sub.threads?.length ?? 0} threads</div>
+                            </div>
+                            <div className="cluster-label">{sub.label || 'Subcluster'}</div>
+                            <ul>
+                              {(sub.threads || []).map((t) => (
+                                <li key={t.thread_id || `${sub.subcluster_id}-${t.subject}`}>
+                                  <div className="subject">{t.subject || '(no subject)'}</div>
+                                  <div className="meta-line small">{t.senders || 'Unknown senders'}</div>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -303,3 +349,6 @@ function extractClusters(res) {
   const noise = payload?.noise_threads || []
   return { clusters, noise }
 }
+
+
+

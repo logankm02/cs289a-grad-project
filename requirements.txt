@@ -11,3 +11,5 @@ openai
 sentence-transformers
 torch
 python-dotenv
+fastapi
+uvicorn

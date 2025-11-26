@@ -17,3 +17,7 @@ token.json
 *.json
 
 chroma_email_index/
+
+# Local notes
+cluster_summary_dennis.txt
+notes.txt

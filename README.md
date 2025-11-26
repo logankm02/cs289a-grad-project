@@ -29,15 +29,15 @@ The first run of either script opens a browser window for Google OAuth and write
 
 The scripts infer behavior from these environment variables:
 
-| Variable | Purpose |
-| --- | --- |
-| `OPENAI_API_KEY` | Enables OpenAI-hosted embeddings (default model `text-embedding-3-small`). |
-| `OPENAI_EMBEDDING_MODEL_NAME` | Override the OpenAI embedding model. |
-| `LOCAL_EMBEDDING_MODEL_NAME` | SentenceTransformer model to load when no OpenAI key is present (defaults to `intfloat/multilingual-e5-large-instruct`). |
-| `GEMINI_API_KEY` | Enables Gemini-powered summaries during clustering. |
-| `GEMINI_GENERATION_MODEL` | Gemini model name override (`gemini-2.5-flash` by default, with automatic fallbacks). |
-| `GMAIL_TOKEN_PATH` | Custom location for the OAuth token file (`token.json` by default). |
-| `GMAIL_CLIENT_SECRET` | Custom path to your OAuth client secret (defaults to the first found among `desktop_credentials.json`, `credentials.json`, or `web_credentials.json`). |
+| Variable                      | Purpose                                                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OPENAI_API_KEY`              | Enables OpenAI-hosted embeddings (default model `text-embedding-3-small`).                                                                             |
+| `OPENAI_EMBEDDING_MODEL_NAME` | Override the OpenAI embedding model.                                                                                                                   |
+| `LOCAL_EMBEDDING_MODEL_NAME`  | SentenceTransformer model to load when no OpenAI key is present (defaults to `intfloat/multilingual-e5-large-instruct`).                               |
+| `GEMINI_API_KEY`              | Enables Gemini-powered summaries during clustering.                                                                                                    |
+| `GEMINI_GENERATION_MODEL`     | Gemini model name override (`gemini-2.5-flash` by default, with automatic fallbacks).                                                                  |
+| `GMAIL_TOKEN_PATH`            | Custom location for the OAuth token file (`token.json` by default).                                                                                    |
+| `GMAIL_CLIENT_SECRET`         | Custom path to your OAuth client secret (defaults to the first found among `desktop_credentials.json`, `credentials.json`, or `web_credentials.json`). |
 
 Environment variables are automatically loaded from `.env` in the project root (or the file pointed to by `CS289A_ENV_FILE`) when [`python-dotenv`](https://pypi.org/project/python-dotenv/) is installed; otherwise export them manually before running the scripts.
 
@@ -72,7 +72,8 @@ python cluster.py --user-email you@example.com \
                   --max-threads 1000 \
                   [--output-file cluster_summary.txt] \
                   [--apply-labels] \
-                  [--log-level DEBUG]
+                  [--log-level DEBUG] \
+                  [--enable-sub-labels]
 ```
 
 - `--apply-labels` pushes generated labels back to Gmail; omit it for a dry run.
@@ -80,8 +81,50 @@ python cluster.py --user-email you@example.com \
 - Provide `--collection` instead of `--user-email` to cluster a specific Chroma collection manually.
 - `--log-level` switches the logging verbosity (DEBUG, INFO, WARNING, etc.).
 - Live progress logs show thread assignment, cluster labeling, and Gmail label application status while the command runs.
+- `--enable-sub-labels` turns on hierarchical sub-labeling within each cluster (optionally uses Gemini for labeling those subclusters).
 
 The script prints a summary of discovered clusters, their representative subjects, and any outlier threads.
+
+## Run the API + UI
+
+The repo includes a lightweight FastAPI backend (`api.py`) and a React/Vite frontend under `frontend/` to drive indexing, clustering, and visualization from the browser.
+
+Backend (from repo root):
+
+```bash
+# activate venv first (see Quick Start above)
+uvicorn api:app --port 8000
+```
+
+- Make sure your environment matches how you indexed (e.g., same `OPENAI_API_KEY` or none) so the backend opens the correct Chroma collection.
+- By default, data is stored in `chroma_email_index/` under the repo root unless `CHROMA_PERSIST_DIRECTORY` is set.
+
+Frontend (from repo root):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+- Vite dev server proxies API calls to `http://localhost:8000/api` by default. If you host the backend elsewhere, set `VITE_API_BASE` to your backend origin.
+
+In the UI:
+
+1. Enter the same email you indexed. If it is new, click "Run indexing (async)" first.
+2. After indexing finishes, run clustering (sync or async). The result panel shows status/logs; clusters render below with subjects/senders (and subclusters if enabled).
+3. Click "Load embeddings & show PCA" to see a scatter plot for the current user's embeddings.
+4. "Load last cluster result" fetches the last completed clustering run on the server.
+
+## UI Sample
+
+### Iteration 2
+
+![Clustering Demo 2nd Iteration UI](/Images/UI_demo_2.png)
+
+### Iteration 1
+
+![Clustering Demo 1st Iteration UI](/Images/UI_demo.png)
 
 ## Virtual Environment Notes
 

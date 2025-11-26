@@ -157,6 +157,24 @@ def _write_cluster_summary(
                     lines.append(f"{idx:>3}. {subject}")
                     lines.append(f"     From: {senders}")
                     lines.append(f"     Last activity: {last_date}")
+
+                # If subclusters exist, include them in the summary
+                subclusters = info.get("subclusters")
+                if subclusters:
+                    lines.append("")
+                    lines.append("  Subclusters:")
+                    for sub in subclusters:
+                        lines.append(
+                            f"    - {sub['label']} ({sub['thread_count']} threads)"
+                        )
+                        for sidx, thread in enumerate(sub.get("threads", [])[:5], start=1):
+                            subject = str(thread.get("subject") or "N/A").strip()
+                            senders = str(thread.get("senders") or "N/A").strip()
+                            last_date = str(thread.get("last_date") or "N/A").strip()
+                            lines.append(f"        {sidx:>3}. {subject}")
+                            lines.append(f"             From: {senders}")
+                            lines.append(f"             Last activity: {last_date}")
+
                 lines.append("-" * 80)
 
         if noise_threads:
@@ -652,6 +670,7 @@ def _fetch_thread_vectors(
         snippet = metadata.get("snippet") or "N/A"
         last_date = metadata.get("last_date") or "N/A"
         message_count = metadata.get("message_count", 1)
+        chunk_text = metadata.get("chunk_text") or ""
 
         thread_vectors[thread_id] = list(embedding)
         thread_metadata[thread_id] = {
@@ -661,6 +680,7 @@ def _fetch_thread_vectors(
             "last_date": str(last_date),
             "message_count": message_count,
             "snippet": str(snippet),
+            "chunk_text": str(chunk_text),
         }
         thread_chunk_index[thread_id] = chunk_index
         thread_timestamp[thread_id] = timestamp
@@ -691,6 +711,7 @@ def cluster_emails(
     max_threads: int = 1000,
     apply_labels: bool = False,
     output_file: Optional[str] = None,
+    enable_sub_labels: bool = False,
 ) -> Dict[str, Any]:
     if CHROMA_IMPORT_ERROR:
         raise RuntimeError(
@@ -708,11 +729,12 @@ def cluster_emails(
     target_label = collection_name or user_email or "unknown"
 
     logger.info(
-        "Starting clustering for %s (min_cluster_size=%d, max_threads=%d, apply_labels=%s)",
+        "Starting clustering for %s (min_cluster_size=%d, max_threads=%d, apply_labels=%s, enable_sub_labels=%s)",
         target_label,
         min_cluster_size,
         max_threads,
         apply_labels,
+        enable_sub_labels,
     )
 
     if collection_name:
@@ -839,21 +861,149 @@ def cluster_emails(
         )
         time.sleep(0.3)
 
+    # ------------------------------------------------------------------
+    # Optional: sub-labeling (hierarchical clustering inside each cluster)
+    # ------------------------------------------------------------------
+    if enable_sub_labels and labeled_clusters and len(thread_vectors) > 0:
+        logger.info("Sub-labeling enabled; performing hierarchical clustering inside clusters.")
+
+        for parent_label, parent_info in labeled_clusters.items():
+            parent_threads = parent_info.get("threads", [])
+            if len(parent_threads) < max(4, min_cluster_size):
+                # Too small to meaningfully sub-cluster
+                continue
+
+            # Collect embeddings for threads in this parent cluster
+            sub_ids: List[str] = []
+            sub_emb_list: List[List[float]] = []
+            for t in parent_threads:
+                tid = t.get("thread_id")
+                if tid and tid in thread_vectors:
+                    sub_ids.append(tid)
+                    sub_emb_list.append(thread_vectors[tid])
+
+            if len(sub_ids) < 4:
+                continue
+
+            sub_embeddings = np.vstack(sub_emb_list).astype(np.float32)
+
+            # Use a smaller min_cluster_size for subclusters
+            sub_min_cluster_size = max(2, min(len(sub_ids) // 2, max(3, min_cluster_size // 2)))
+            logger.info(
+                "Sub-clustering parent '%s' with %d threads (min_cluster_size=%d)",
+                parent_label,
+                len(sub_ids),
+                sub_min_cluster_size,
+            )
+
+            try:
+                sub_clusterer = hdbscan.HDBSCAN(
+                    min_cluster_size=sub_min_cluster_size,
+                    metric="euclidean",
+                    cluster_selection_method="eom",
+                )
+                sub_labels = sub_clusterer.fit_predict(sub_embeddings).tolist()
+            except Exception as exc:
+                logger.warning(
+                    "Sub-clustering failed for parent '%s': %s",
+                    parent_label,
+                    exc,
+                )
+                continue
+
+            # Group threads by subcluster label
+            subclusters_raw: Dict[int, List[Dict[str, Any]]] = {}
+            for idx, sub_label in enumerate(sub_labels):
+                if sub_label == -1:
+                    continue  # treat as noise within the parent
+                tid = sub_ids[idx]
+                for t in parent_threads:
+                    if t.get("thread_id") == tid:
+                        subclusters_raw.setdefault(sub_label, []).append(t)
+                        break
+
+            if not subclusters_raw:
+                continue
+
+            # Label subclusters using Gemini, if available
+            subcluster_list: List[Dict[str, Any]] = []
+            for sub_id, sub_threads in subclusters_raw.items():
+                sub_label_text = f"{parent_label} / Subcluster {sub_id}"
+                if gemini_model:
+                    sub_prompt = (
+                        "You are labeling sub-groups of emails inside a larger category.\n"
+                        f"The parent cluster label is: '{parent_label}'.\n"
+                        f"This subcluster contains {len(sub_threads)} email threads. Here are some examples:\n\n"
+                    )
+                    for idx, info in enumerate(sub_threads[:5]):
+                        sub_prompt += f"Thread {idx + 1}:\n"
+                        sub_prompt += f"  Subject: {info['subject']}\n"
+                        sub_prompt += f"  From: {info['senders']}\n"
+                        sub_prompt += f"  Messages: {info['message_count']}\n\n"
+                    sub_prompt += (
+                        "Based on these emails, generate a short, descriptive sub-label (2-4 words)\n"
+                        "that is MORE specific than the parent label.\n"
+                        "Respond with ONLY the sub-label, no explanation."
+                    )
+                    try:
+                        resp = gemini_model.generate_content(
+                            sub_prompt,
+                            generation_config={"temperature": 0.3},  # type: ignore[arg-type]
+                        )
+                        if getattr(resp, "text", None):
+                            sub_label_text = resp.text.strip().replace('"', "")
+                    except Exception as exc:
+                        logger.warning(
+                            "Gemini sub-labeling failed for parent '%s', subcluster %d: %s",
+                            parent_label,
+                            sub_id,
+                            exc,
+                        )
+
+                subcluster_list.append(
+                    {
+                        "subcluster_id": sub_id,
+                        "label": sub_label_text,
+                        "thread_count": len(sub_threads),
+                        "threads": sub_threads,
+                    }
+                )
+                logger.info(
+                    "Parent '%s': subcluster %d labeled as '%s' (%d threads)",
+                    parent_label,
+                    sub_id,
+                    sub_label_text,
+                    len(sub_threads),
+                )
+
+            if subcluster_list:
+                parent_info["subclusters"] = subcluster_list
+
     label_cache: Dict[str, str] = {}
     labels_applied_successfully = False
     labeling_attempted = apply_labels
     total_labeling_time = 0.0
     all_requests: List[Any] = []
 
+
     if apply_labels and labeled_clusters:
         service = get_gmail_service(user_email)
         try:
+            from collections import defaultdict
+
+            # Map each thread_id -> set of Gmail label IDs to add
+            thread_to_label_ids: Dict[str, set[str]] = defaultdict(set)
+
             total_label_clusters = len(labeled_clusters)
             for cluster_index, (cluster_label, cluster_info) in enumerate(
-                labeled_clusters.items(), start=1
+                    labeled_clusters.items(), start=1
             ):
-                label_id = create_label_if_missing(service, cluster_label, cache=label_cache)
-                if not label_id:
+                # Parent cluster label (e.g. "Offers and Points")
+                parent_label_name = cluster_label
+                parent_label_id = create_label_if_missing(
+                    service, parent_label_name, cache=label_cache
+                )
+                if not parent_label_id:
                     logger.info(
                         "Label application skipped for cluster '%s' "
                         "(missing Gmail label id, %d/%d)",
@@ -862,23 +1012,66 @@ def cluster_emails(
                         total_label_clusters,
                     )
                     continue
-                for thread in cluster_info["threads"]:
-                    request = (
-                        service.users()
-                        .threads()
-                        .modify(
-                            userId="me",
-                            id=thread["thread_id"],
-                            body={"addLabelIds": [label_id]},
+
+                subclusters = cluster_info.get("subclusters") or []
+
+                if subclusters:
+                    # Nested labels for each subcluster
+                    for sub in subclusters:
+                        sub_short_label = (sub.get("label") or "").strip() or "Subcluster"
+                        # Gmail uses "/" to make hierarchical labels
+                        full_label_name = f"{parent_label_name}/{sub_short_label}"
+                        sub_label_id = create_label_if_missing(
+                            service, full_label_name, cache=label_cache
                         )
-                    )
-                    all_requests.append(request)
+                        if not sub_label_id:
+                            logger.warning(
+                                "Could not create/find Gmail label for subcluster '%s'",
+                                full_label_name,
+                            )
+                            continue
+
+                        for thread in sub.get("threads", []):
+                            tid = thread["thread_id"]
+                            thread_to_label_ids[tid].add(parent_label_id)
+                            thread_to_label_ids[tid].add(sub_label_id)
+
+                    # Some parent threads might not end up in any subcluster:
+                    subcluster_thread_ids = {
+                        t["thread_id"]
+                        for sub in subclusters
+                        for t in sub.get("threads", [])
+                    }
+                    for thread in cluster_info["threads"]:
+                        tid = thread["thread_id"]
+                        if tid not in subcluster_thread_ids:
+                            thread_to_label_ids[tid].add(parent_label_id)
+                else:
+                    # No subclusters – only the parent label
+                    for thread in cluster_info["threads"]:
+                        tid = thread["thread_id"]
+                        thread_to_label_ids[tid].add(parent_label_id)
+
                 logger.info(
-                    "Label application prep: %d/%d clusters queued (%d requests total)",
+                    "Label application prep: %d/%d clusters queued (%d threads accumulated)",
                     cluster_index,
                     total_label_clusters,
-                    len(all_requests),
+                    len(thread_to_label_ids),
                 )
+
+            # Turn the mapping into actual Gmail modify() requests
+            for tid, label_ids in thread_to_label_ids.items():
+                request = (
+                    service.users()
+                    .threads()
+                    .modify(
+                        userId="me",
+                        id=tid,
+                        body={"addLabelIds": list(label_ids)},
+                    )
+                )
+                all_requests.append(request)
+
         except Exception as exc:  # pragma: no cover - network call
             logger.error("Error preparing Gmail label requests: %s", exc)
             all_requests = []
@@ -931,7 +1124,17 @@ def cluster_emails(
         print("   Sample subjects:")
         for thread in cluster_info["threads"][:3]:
             print(f"   - {thread['subject'][:60]}...")
+
+        # Optional subclusters
+        subclusters = cluster_info.get("subclusters")
+        if subclusters:
+            print("   Subclusters:")
+            for sub in subclusters:
+                print(f"      - {sub['label']} ({sub['thread_count']} threads)")
+                for t in sub["threads"][:2]:
+                    print(f"         * {t['subject'][:60]}...")
         print()
+
     if noise_threads:
         print("NOISE/OUTLIER THREADS:")
         for thread in noise_threads[:5]:
@@ -968,6 +1171,46 @@ def cluster_emails(
     return results
 
 
+def _write_ics_events(events: List[Dict[str, Any]], output_path: str) -> None:
+    """
+    Write a list of events to an .ics file.
+
+    Event dict keys expected:
+      - uid (str)
+      - dtstart (str, in UTC like 20250101T090000Z)
+      - dtend   (str, same format)
+      - summary (str)
+      - description (str)
+      - location (str, optional)
+    """
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//gmail-tools//email-cluster-export//EN",
+    ]
+    for ev in events:
+        lines.extend(
+            [
+                "BEGIN:VEVENT",
+                f"UID:{ev.get('uid')}",
+                f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+                f"DTSTART:{ev.get('dtstart')}",
+                f"DTEND:{ev.get('dtend')}",
+                f"SUMMARY:{ev.get('summary','')}",
+                f"DESCRIPTION:{ev.get('description','')}",
+            ]
+        )
+        location = ev.get("location")
+        if location:
+            lines.append(f"LOCATION:{location}")
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\r\n".join(lines))
+    logger.info("Wrote %d events to %s", len(events), output_path)
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cluster Gmail threads stored in ChromaDB.")
     parser.add_argument(
@@ -996,6 +1239,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Apply generated labels back to Gmail threads.",
     )
     parser.add_argument(
+        "--enable-sub-labels",
+        action="store_true",
+        help="Enable hierarchical sub-labeling within each top-level cluster.",
+    )
+    parser.add_argument(
         "--output-file",
         help="Optional path to write a detailed text summary of clusters.",
     )
@@ -1004,7 +1252,197 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="INFO",
         help="Logging level (e.g. DEBUG, INFO, WARNING). Default INFO.",
     )
+    parser.add_argument(
+        "--export-meetings-ics",
+        help="Optional path to write meeting-like emails as an .ics calendar file.",
+    )
+    parser.add_argument(
+        "--export-tasks",
+        help="Optional path to write extracted tasks (Markdown/CSV) from emails.",
+    )
     return parser.parse_args(argv)
+
+
+def extract_meetings_from_clusters(
+    clusters: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Very lightweight meeting extractor.
+
+    For each thread, we send subject + snippet + chunk_text to Gemini
+    and ask for a single event (or 'none') in JSON.
+    """
+    if not USE_GEMINI_FEATURES:
+        logger.warning("Gemini not configured; meeting extraction will be skipped.")
+        return []
+
+    try:
+        model = make_gemini_model()
+    except Exception as exc:  # pragma: no cover
+        logger.error("Failed to initialize Gemini for meeting extraction: %s", exc)
+        return []
+
+    events: List[Dict[str, Any]] = []
+    for cluster_label, info in clusters.items():
+        for thread in info.get("threads", []):
+            text = (
+                f"Subject: {thread.get('subject','')}\n"
+                f"From: {thread.get('senders','')}\n"
+                f"Snippet: {thread.get('snippet','')}\n"
+                f"BodyExcerpt: {thread.get('chunk_text','')}\n"
+            )
+            prompt = (
+                "You are an assistant that extracts meeting events from emails.\n"
+                "Given the following email content, decide whether it describes a meeting or call.\n"
+                "If yes, output a single JSON object with keys:\n"
+                '  "title", "start_utc", "end_utc", "location", "notes"\n'
+                "Use ISO-like UTC datetime format: YYYYMMDDTHHMMSSZ.\n"
+                "If nothing looks like a scheduled meeting, respond with exactly: NONE\n\n"
+                f"EMAIL:\n{text}"
+            )
+            try:
+                resp = model.generate_content(
+                    prompt,
+                    generation_config={"temperature": 0.1},  # type: ignore[arg-type]
+                )
+                raw = (resp.text or "").strip()
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Gemini error while extracting meeting: %s", exc)
+                continue
+
+            if not raw or raw.upper().startswith("NONE"):
+                continue
+
+            # Very minimal JSON parsing with protection
+            import json
+
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.debug("Could not parse meeting JSON: %s", raw)
+                continue
+
+            title = data.get("title") or thread.get("subject", "Meeting")
+            start = data.get("start_utc")
+            end = data.get("end_utc")
+            if not start or not end:
+                continue
+
+            uid = f"{thread.get('thread_id')}-meeting"
+            event = {
+                "uid": uid,
+                "dtstart": start,
+                "dtend": end,
+                "summary": title,
+                "description": data.get("notes", "")[:500],
+                "location": data.get("location", ""),
+            }
+            events.append(event)
+
+    logger.info("Extracted %d potential meeting events", len(events))
+    return events
+
+
+def extract_tasks_from_clusters(
+    clusters: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Extract action items from clustered emails using Gemini.
+
+    Returns a list of tasks:
+      - title
+      - source_subject
+      - source_senders
+      - due (optional, free-text or YYYY-MM-DD)
+      - priority (LOW/MEDIUM/HIGH)
+    """
+    if not USE_GEMINI_FEATURES:
+        logger.warning("Gemini not configured; task extraction will be skipped.")
+        return []
+
+    try:
+        model = make_gemini_model()
+    except Exception as exc:  # pragma: no cover
+        logger.error("Failed to initialize Gemini for task extraction: %s", exc)
+        return []
+
+    tasks: List[Dict[str, Any]] = []
+
+    for cluster_label, info in clusters.items():
+        for thread in info.get("threads", []):
+            text = (
+                f"Subject: {thread.get('subject', '')}\n"
+                f"From: {thread.get('senders', '')}\n"
+                f"Snippet: {thread.get('snippet', '')}\n"
+                f"BodyExcerpt: {thread.get('chunk_text', '')}\n"
+            )
+            prompt = (
+                "You are an assistant that extracts TODO tasks from emails.\n"
+                "From the following email, list clear action items as a JSON array.\n"
+                "Each item should be an object with keys:\n"
+                '  "title", "due", "priority"\n'
+                'where "priority" is one of LOW, MEDIUM, HIGH, and "due" can be "" if unknown.\n'
+                "If there are no tasks, respond with [] (empty JSON array).\n\n"
+                f"EMAIL:\n{text}"
+            )
+
+            try:
+                resp = model.generate_content(
+                    prompt,
+                    generation_config={"temperature": 0.2},  # type: ignore[arg-type]
+                )
+                raw = (resp.text or "").strip()
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Gemini error while extracting tasks: %s", exc)
+                continue
+
+            import json
+
+            try:
+                arr = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.debug("Could not parse task JSON: %s", raw)
+                continue
+
+            if not isinstance(arr, list):
+                continue
+
+            for item in arr:
+                title = (item.get("title") or "").strip()
+                if not title:
+                    continue
+                tasks.append(
+                    {
+                        "title": title,
+                        "due": (item.get("due") or "").strip(),
+                        "priority": (item.get("priority") or "MEDIUM").upper(),
+                        "source_subject": thread.get("subject", ""),
+                        "source_senders": thread.get("senders", ""),
+                    }
+                )
+
+    logger.info("Extracted %d tasks from email clusters", len(tasks))
+    return tasks
+
+
+def write_tasks_markdown(tasks: List[Dict[str, Any]], output_path: str) -> None:
+    lines = ["# Email Tasks", ""]
+    if not tasks:
+        lines.append("_No tasks found._")
+    else:
+        for t in tasks:
+            line = f"- [ ] **{t['title']}**"
+            if t.get("due"):
+                line += f" (due: {t['due']})"
+            line += f" — _priority: {t['priority']}_"
+            line += (
+                f"\n  from: `{t['source_subject']}` ({t['source_senders']})"
+            )
+            lines.append(line)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info("Wrote %d tasks to %s", len(tasks), output_path)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1017,18 +1455,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("--apply-labels requires --user-email.")
         return 1
     try:
-        cluster_emails(
+        result = cluster_emails(
             user_email=args.user_email,
             collection_name=args.collection,
             min_cluster_size=args.min_cluster_size,
             max_threads=args.max_threads,
             apply_labels=args.apply_labels,
             output_file=args.output_file,
+            enable_sub_labels=args.enable_sub_labels,
         )
     except Exception as exc:
         logger.error("Clustering failed: %s", exc, exc_info=True)
         print(f"Clustering failed: {exc}")
         return 1
+
+    clusters = result["results"]["clusters"]
+
+    # export meetings as ICS if requested
+    if args.export_meetings_ics:
+        events = extract_meetings_from_clusters(clusters)
+        _write_ics_events(events, args.export_meetings_ics)
+
+    # export tasks if requested
+    if args.export_tasks:
+        tasks = extract_tasks_from_clusters(clusters)
+        write_tasks_markdown(tasks, args.export_tasks)
+
     return 0
 
 
